@@ -1,0 +1,21 @@
+# Put this on the app's trusted Docker network, behind an OAuth resource sidecar.
+# No published MCP port; do not expose an unauthenticated backend to the internet.
+services:
+  minuspod-mcp:
+    image: ghcr.io/justmytwospence/minuspod-mcp:0.1.0
+    restart: unless-stopped
+    environment:
+      MINUSPOD_URL: ${MINUSPOD_URL:-http://minuspod:8000}
+      MINUSPOD_ADMIN_PASSWORD: ${MINUSPOD_ADMIN_PASSWORD:?set the private app password}
+      MINUSPOD_ENABLE_PAID_OPERATIONS: ${MINUSPOD_ENABLE_PAID_OPERATIONS:-false}
+      MINUSPOD_FEED_HOSTS: ${MINUSPOD_FEED_HOSTS:-}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-minuspod-mcp}
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    networks: [app]
+networks:
+  app:
+    external: true
+    name: ${MINUSPOD_NETWORK:-traefik}
