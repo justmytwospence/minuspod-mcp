@@ -1,6 +1,6 @@
 {
   "name": "minuspod-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Narrow MCP integration for MinusPod",
   "private": true,
   "type": "module",

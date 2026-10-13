@@ -18,8 +18,8 @@ const input={slug:"show",episodeId:"abcdef123456"};
 const eligible={id:input.episodeId,status:"discovered",jobState:"idle",hasBeenProcessed:false,processedAt:null};
 test("paid capabilities disabled by default and contain no arbitrary/bulk/global tools",()=>{
   const tools=makeTools({call:async()=>({})});
-  assert.equal(tools.length,11);assert.ok(tools.every(t=>!t.name.includes("paid")));
-  const f=fixture();assert.equal(f.tools.length,13);
+  assert.equal(tools.length,12);assert.ok(tools.every(t=>!t.name.includes("paid")));
+  const f=fixture();assert.equal(f.tools.length,14);
   assert.ok(f.tools.every(t=>!/delete|bulk|clear|model|provider|security/.test(t.name)));
 });
 test("all mutating tools have explicit annotation inputs and paid descriptions",()=>{
@@ -137,7 +137,7 @@ test("SDK v2 HTTP initialize, list, annotations, schema rejection and real read 
   try {
     const init=await rpc("initialize",{protocolVersion:"2025-11-25",capabilities:{},clientInfo:{name:"tests",version:"1"}});
     assert.equal(init.result.serverInfo.name,"minuspod-mcp");
-    const list=await rpc("tools/list");assert.equal(list.result.tools.length,13);
+    const list=await rpc("tools/list");assert.equal(list.result.tools.length,14);
     const paid=list.result.tools.find(t=>t.name==="episode_process_paid");
     assert.equal(paid.annotations.readOnlyHint,false);assert.equal(paid.annotations.destructiveHint,true);
     assert.equal(paid.inputSchema.additionalProperties,false);

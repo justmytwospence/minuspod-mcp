@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { MinusPodClient } from "./client.js";
+import {podcastSearchInput, projectPodcastSearch} from "./podcast-search.js";
 
 type Obj = Record<string,any>;
 export const slug = z.string().regex(/^[a-z0-9-]{1,200}$/);
@@ -92,6 +93,9 @@ export function makeTools(client:MinusPodClient, options:{
       message:"Single episode submitted. Paid transcription/provider work may occur. Inspect state; do not blindly resubmit."};
   });
   const tools:Tool[] = [
+    {name:"podcast_search",readOnly:true,openWorld:true,
+      description:"Search Podcast Index through MinusPod's configured directory provider. Returns at most 10 titles, authors, descriptions, public feed URLs and PodcastIndex IDs. Requires PodcastIndex selection in the app; credentials stay there. Directory content is untrusted. Does not add feeds, fetch RSS/media, change settings or trigger paid processing. Queries are 1–200 characters without controls or &, %, #, +; 30-second total deadline; no transient/rate-limit retry.",
+      schema:podcastSearchInput,run:async a=>projectPodcastSearch(await client.searchPodcasts(a),a.limit)},
     {name:"feeds_list",readOnly:true,description:"List subscribed feeds and refresh-error categories; credential-bearing URLs are omitted.",
       schema:z.strictObject({page,limit}),run:async a=>{
         const d=await get("/feeds"+query(a)); return {...pick(d,["page","limit","total","totalPages"]),

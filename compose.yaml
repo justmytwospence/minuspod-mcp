@@ -2,7 +2,7 @@
 # No published MCP port; do not expose an unauthenticated backend to the internet.
 services:
   minuspod-mcp:
-    image: ghcr.io/justmytwospence/minuspod-mcp:0.1.0
+    image: ghcr.io/justmytwospence/minuspod-mcp:0.2.0
     restart: unless-stopped
     environment:
       MINUSPOD_URL: ${MINUSPOD_URL:-http://minuspod:8000}
