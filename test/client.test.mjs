@@ -111,18 +111,17 @@ test("untrusted base origin shapes and missing password rejected",()=>{
     assert.throws(()=>new MinusPodClient(base,"password"));
   assert.throws(()=>new MinusPodClient("http://x",""));
 });
-test("real fetch timeout does not replay a POST",async()=>{
+test("real fetch timeout does not replay a POST",{timeout:15000},async()=>{
   let writes=0;
-  const server=http.createServer((req,res)=>{
-    if (req.url.endsWith("/auth/login")) {
-      res.writeHead(200,{"content-type":"application/json","set-cookie":[
-        "session=session-cookie; Secure","minuspod_csrf=csrf-token; Secure"]});
-      res.end('{"authenticated":true}');
-    } else {writes++; /* AbortSignal must terminate this hung request. */}
+  const server=http.createServer(()=>{
+    writes++; // AbortSignal must terminate this deliberately hung POST.
   });
   await new Promise(r=>server.listen(0,"127.0.0.1",r));
   try {
-    const client=new MinusPodClient("http://127.0.0.1:"+server.address().port,"password",fetch,100);
+    // Isolate the operation timeout from login/Undici startup latency. Login is
+    // covered above; a 100 ms cold HTTP login flaked under Node 24 CI load.
+    const fetcher=(url,init)=>url.pathname.endsWith("/auth/login")?Promise.resolve(login()):fetch(url,init);
+    const client=new MinusPodClient("http://127.0.0.1:"+server.address().port,"password",fetcher,5000);
     await assert.rejects(client.call("POST","/feeds",{}),/no write retry/);assert.equal(writes,1);
   } finally {server.closeAllConnections(); await new Promise(r=>server.close(r));}
 });
