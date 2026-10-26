@@ -27,13 +27,15 @@ function publicFeedUrl(value:unknown):string|null {
     return url.href;
   } catch { return null; }
 }
-function metadataText(value:unknown, max:number):string {
+export function metadataText(value:unknown, max:number):string {
   if (typeof value !== "string") return "";
   // Metadata is untrusted directory content. Embedded links may themselves be
   // authenticated/signed; return only the separately checked feed URL.
-  return value.slice(0,max)
+  const secret=process.env.MINUSPOD_ADMIN_PASSWORD;
+  // Redact the known app secret before truncation/JSON escaping can split it.
+  return (secret?value.replaceAll(secret,"[redacted]"):value).slice(0,max)
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "")
-    .replace(/(?:https?|ftp):\/\/[^\s<>"']*/giu, "[URL omitted]")
+    .replace(/(?:[a-z][a-z0-9+.-]*:\/\/|\/\/)[^\s<>"']*/giu, "[URL omitted]")
     .replace(/\b(?:Bearer|Basic)\s+[^\s<>"']+/giu, "[redacted]")
     .replace(/\b(?:api[-_ ]?(?:key|secret)|password|secret|token|cookie|authorization|session|x-auth-key)\s*[:=]\s*(?:"[^"]*(?:"|$)|'[^']*(?:'|$)|[^\s,;<>]+)/giu, "[redacted]")
     .slice(0,max);

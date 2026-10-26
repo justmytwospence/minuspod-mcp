@@ -30,6 +30,12 @@ No deletion, bulk/OPML, arbitrary API paths/settings, audio/JIT fetching, global
 settings, retention, models, providers, security, cleanup or shadow-session controls.
 Pagination is bounded to 100 items. Writes are serialized across HTTP request
 factories. Strict schemas reject unknown fields, including fake confirmation fields.
+All tools declare titles, all four annotation hints, and runtime-validated output
+schemas alongside matching JSON text/structured results. Safe projection fields
+are optional scalar values to tolerate upstream field absence; nested/unrecognized
+fields are omitted, not passed through. Display override replacement is destructive
+and idempotent; other writes are non-idempotent. Remote app metadata reads are
+closed-scope; directory/RSS/paid actions advertise open-world interaction.
 
 ### Podcast Index search
 
@@ -76,6 +82,74 @@ do not rely on a prompt saying “ask first.” For unattended clients that must
 spend, leave paid tools disabled or enforce tool-level permission/approval in the
 client or its gateway. The server itself cannot verify a human approved a call.
 
+## Resources, templates and review prompts
+
+Discovery and prompt retrieval never contact MinusPod, log in, probe a provider,
+fetch media or run a write. All use the same authenticated MCP transport as tools.
+
+| Resource | Base request cost on read |
+| --- | --- |
+| `minuspod://usage` | 0; usage, bounds, backoff and monetary-safety guide |
+| `minuspod://capabilities` | 0; exposed tools and paid enablement, no provider/settings credentials |
+| `minuspod://status` | 0; cached process-local attempt counters, timestamps, last observations and login cooldown |
+| `minuspod://queue` | 2 app metadata GETs; jobs, counts and app-maintenance holds |
+| `minuspod://spend` | 2 app metadata GETs; aggregate LLM spend and existing monetary admission state |
+| `minuspod:feeds/{slug}` | 1 app metadata GET; sanitized feed projection |
+| `minuspod:feeds/{slug}/episodes/{episodeId}` | 1 app metadata GET; sanitized episode and per-run spend |
+| `minuspod:feeds/{slug}/episodes?limit={limit}&offset={offset}` | 1 app metadata GET; one explicit bounded page |
+
+These base costs exclude login and at most one retry per metadata GET. Each
+constituent call may add an initial login and a 401 re-login; concurrent requests
+coalesce authentication. `observedAt` is receipt time, not a provider refresh time;
+two-endpoint queue/spend reads are non-atomic and fail without a partial result
+if either request fails. Cached status is not app health and does not refresh data.
+Counters include failed attempts/retries since this process started, not other
+clients. An old last HTTP status may precede a newer transport/response failure.
+
+Templates deliberately use opaque `minuspod:feeds/` URIs to avoid the SDK's
+hierarchical URL dot-segment normalization. They accept only the same literal
+safe slugs/episode IDs as tools; pagination
+requires canonical decimal limit 1–100 and offset 0–100000, with no extra query
+parameters. Arrays are defensively capped with explicit truncation flags (queue
+arrays at 100, lists at the requested limit), text is bounded, and metadata-embedded
+URLs/recognizable credentials are redacted. Response slicing does not bound the
+upstream app's work. Pagination totals, when supplied, come from the app; one page
+is not full coverage. No template exposes audio, transcripts or raw provider errors.
+Only `podcast_search` can return separately validated public directory feed URLs.
+
+`failure-triage` and `paid-action-review` take one `slug` and `episodeId`. They return
+review-only checklists, including read costs, stale/unknown state, eligibility,
+monetary uncertainty and ambiguous-write recovery. They do not read resources,
+execute tools, authorize a write or imply a human confirmed. The paid review is
+available with paid tools disabled and explicitly states those tools are absent.
+
+### Three separate kinds of limits
+
+- **App metadata requests:** general quota/remaining/reset are unknown. Use cached
+  status first, bounded pages next, and avoid rapid polling or unbounded fan-out.
+- **Directory search:** the pinned app route is 30/minute, not a known PodcastIndex
+  provider quota or remaining allowance. Search has no transient/429 retry, and
+  HTTP 502 can mask provider throttling/timeouts. It does not spend a processing budget.
+- **Monetary processing admission:** existing daily budgets, active reservations,
+  known/unknown spend and provider policy are separate from HTTP quotas. Aggregate
+  LLM spend is not a complete transcription/provider cost estimate or a hard MCP cap.
+
+Status records last 429 observation and validated `Retry-After` times from app
+responses only (integer seconds or canonical RFC 1123 HTTP-date); no direct
+provider-header visibility is
+claimed. A known 429 cooldown blocks further attempts conservatively in the same
+local request group (authentication, metadata read/write, directory search), not
+an invented authoritative app-wide limiter. Missing/invalid reset headers remain
+unknown, not a fabricated wait/allowance. After expiry the historical observation
+remains visible; it is not proof quota is available. Failed login applies a local
+60-second cooldown, or a longer observed `Retry-After`. These observations contain
+no request URLs, paths, queries, credentials, cookies or raw errors.
+
+Write base costs: feed add/update are 1 POST/PATCH respectively; refresh, cancel
+and paid tools are 1 preflight GET + 1 POST. Feed add/refresh can fetch RSS; only
+paid tools can request paid episode processing. No write is automatically replayed,
+including on authentication failure, rate limiting or a lost response.
+
 ## Authentication and privacy
 
 Only the backend holds `MINUSPOD_ADMIN_PASSWORD`. It logs in at
@@ -94,7 +168,7 @@ in the app. Non-search requests time out after 90 seconds; bodies are bounded to
 8 MiB. Only GET can retry once (401 re-login or transient/transport failure);
 search uses the stricter limits above and retries only a single 401. No write
 is ever replayed. After an ambiguous write, inspect state before acting again.
-Failed login has a 60-second cooldown.
+Failed login has a local cooldown of at least 60 seconds.
 
 ## Deployment
 
@@ -127,7 +201,10 @@ handling, login coalescing/cooldown, timeouts, body bounds, no write retries,
 strict inputs, credential-free projections, paid eligibility, safe feed writes,
 write concurrency, SDK handshake/list/call and tool annotations. Search tests
 cover query injection, provider identity, bounded projections, unsafe URLs,
-metadata/error redaction, rate limits, body limits and total deadlines.
+metadata/error redaction, rate limits, body limits and total deadlines. Discovery
+contract tests exercise initialization, resources/templates/prompts, zero-call cached
+status, request costs, URI bounds, output schemas, truncation, metadata redaction,
+paid-disabled behavior, fake-clock cooldowns and exact HTTP-attempt accounting.
 Dependencies are exact pins selected from releases at least seven days old.
 `vX.Y.Z` tags publish multi-architecture GHCR images via the Hardcover workflow
 pattern; CI and release both run tests.

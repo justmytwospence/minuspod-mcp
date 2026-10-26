@@ -7,11 +7,24 @@ import {podcastSearchInput, PodcastSearchError, PODCAST_SEARCH_TIMEOUT_MS,
   PODCAST_SEARCH_MAX_BYTES, type PodcastSearchInput} from "./podcast-search.js";
 
 export class ApiError extends Error {
-  constructor(public readonly status: number, message = "MinusPod API request failed") {
-    super(`${message} (HTTP ${status}); inspect the app locally. Writes were not retried.`);
+  constructor(public readonly status: number, message = "MinusPod API request failed", public readonly retryAfterAt:string|null=null) {
+    super(`${message} (HTTP ${status}); inspect the app locally. Writes were not retried.`+
+      (status===429 ? ` No automatic retry. ${retryAfterAt ? `Retry-After/cooldown until ${retryAfterAt}.` : "Retry-After/reset unknown; wait before a bounded manual retry."}` : ""));
   }
 }
 type Json = Record<string, any>;
+type RequestKind="authentication"|"metadataRead"|"metadataWrite"|"directorySearch";
+type Observation={attempts:number;inFlight:number;lastAttemptAt:string|null;lastResponseAt:string|null;
+  lastHttpStatus:number|null;lastFailureAt:string|null;lastRateLimitAt:string|null;retryAfterAt:string|null;retryAfterObservedAt:string|null};
+function retryAfter(value:string|null, now:number):string|null {
+  if (!value || value.length>100) return null;
+  const seconds=/^\d+$/.test(value);
+  const ms=seconds ? now+Number(value)*1000 :
+    /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(value) ? Date.parse(value) : NaN;
+  if (!Number.isFinite(ms) || ms<now || ms>8640000000000000) return null;
+  const date=new Date(ms);
+  return seconds || date.toUTCString()===value ? date.toISOString() : null;
+}
 // A search deadline also bounds waiting for a shared login, without cancelling
 // another caller's authentication request. Late login completion cannot search.
 async function waitWithSignal<T>(promise:Promise<T>, signal:AbortSignal):Promise<T> {
@@ -27,17 +40,39 @@ export class MinusPodClient {
   private loginFlight?: Promise<void>;
   private loginBlockedUntil = 0;
   private readonly base: URL;
+  private readonly observations=Object.fromEntries(
+    (["authentication","metadataRead","metadataWrite","directorySearch"] as const).map(kind=>[kind,{
+      attempts:0,inFlight:0,lastAttemptAt:null,lastResponseAt:null,lastHttpStatus:null,
+      lastFailureAt:null,lastRateLimitAt:null,retryAfterAt:null,retryAfterObservedAt:null,
+    }])) as Record<RequestKind,Observation>;
+  private readonly startedAt:string;
   constructor(
     base: string, private readonly password: string,
     private readonly fetcher: typeof fetch = fetch,
     private readonly timeoutMs = 90000,
+    private readonly now:()=>number = Date.now,
   ) {
+    this.startedAt=new Date(this.now()).toISOString();
     this.base = new URL(base);
     if (!["http:", "https:"].includes(this.base.protocol) || this.base.username ||
         this.base.password || this.base.search || this.base.hash ||
         !["/", ""].includes(this.base.pathname) || !password) {
       throw new Error("Configure a trusted MinusPod origin and nonempty server-side password");
     }
+  }
+  // Pure local snapshot: no session refresh, health check or provider probe.
+  localStatus() {
+    return {source:"process-local HTTP attempt accounting; not upstream quota",startedAt:this.startedAt,
+      generatedAt:new Date(this.now()).toISOString(),
+      login:{sessionPresent:this.cookies.has("session")&&this.cookies.has("minuspod_csrf"),
+        inFlight:!!this.loginFlight,cooldownUntil:this.loginBlockedUntil>this.now()?new Date(this.loginBlockedUntil).toISOString():null,
+        cooldownSource:"local 60-second login-failure policy, or longer observed Retry-After"},
+      observations:structuredClone(this.observations),
+      cooldownScope:"process-local request groups; longest active app Retry-After observation, not an authoritative global/provider reset",
+      metadataQuota:{limit:null,remaining:null,resetAt:null},
+      directorySearch:{documentedAppRouteRequestsPerMinute:30,remaining:null,resetAt:null,
+        providerQuota:"unknown; app 502 can mask PodcastIndex throttling/timeouts"},
+      monetaryBudget:"separate app admission/spend state; not an HTTP request allowance"};
   }
   // No caller-supplied URL, arbitrary paths, HTTP verbs, or global-setting writes.
   private validPath(method: string, path: string): boolean {
@@ -57,6 +92,14 @@ export class MinusPodClient {
     signal?:AbortSignal; maxBytes?:number;
   } = {}): Promise<Json> {
     const maxBytes=options.maxBytes??8*1024*1024;
+    const kind:RequestKind=path==="/auth/login"?"authentication":path.startsWith("/podcast-search?")?
+      "directorySearch":method==="GET"?"metadataRead":"metadataWrite";
+    const observation=this.observations[kind];
+    // Conservative process-local grouping, not a claim about the app's global limiter scope.
+    if (observation.retryAfterAt && Date.parse(observation.retryAfterAt)>this.now())
+      throw new ApiError(429,"MinusPod local request-group cooldown active",observation.retryAfterAt);
+    observation.attempts++; observation.inFlight++;
+    observation.lastAttemptAt=new Date(this.now()).toISOString();
     const headers: Record<string,string> = {
       "Content-Type":"application/json", "Accept":"application/json",
       // Cannot accidentally masquerade as Pocket Casts and trigger public JIT.
@@ -70,9 +113,22 @@ export class MinusPodClient {
         method, headers, body: body === undefined ? undefined : JSON.stringify(body),
         redirect:"error", signal:options.signal??AbortSignal.timeout(this.timeoutMs),
       });
+      observation.lastResponseAt=new Date(this.now()).toISOString();
+      observation.lastHttpStatus=response.status;
+      if (response.status===429) {
+        observation.lastRateLimitAt=observation.lastResponseAt;
+        const candidate=retryAfter(response.headers.get("retry-after"),this.now());
+        // In-flight responses may arrive out of order. A shorter/missing header
+        // must not erase a still-active cooldown already observed by this group.
+        if (!observation.retryAfterAt || Date.parse(observation.retryAfterAt)<=this.now() ||
+            (candidate && Date.parse(candidate)>Date.parse(observation.retryAfterAt))) {
+          observation.retryAfterAt=candidate;
+          observation.retryAfterObservedAt=candidate?observation.lastResponseAt:null;
+        }
+      }
       if (!response.ok) {
         await response.body?.cancel();
-        throw new ApiError(response.status);
+        throw new ApiError(response.status,undefined,response.status===429?observation.retryAfterAt:null);
       }
       if (!response.headers.get("content-type")?.includes("application/json")) {
         await response.body?.cancel();
@@ -102,15 +158,16 @@ export class MinusPodClient {
       }
       return data;
     } catch (error) {
+      observation.lastFailureAt=new Date(this.now()).toISOString();
       if (error instanceof ApiError) throw error;
       // Never propagate fetch/JSON/upstream error text or credential-bearing URLs.
       throw new Error("MinusPod transport/response failed; no write retry. Check local app health.");
-    }
+    } finally { observation.inFlight--; }
   }
   private async login(): Promise<void> {
     if (this.cookies.has("session") && this.cookies.has("minuspod_csrf")) return;
     if (this.loginFlight) return this.loginFlight;
-    if (Date.now() < this.loginBlockedUntil) throw new Error("MinusPod login cooling down after failure");
+    if (this.now() < this.loginBlockedUntil) throw new Error(`MinusPod login cooling down after failure until ${new Date(this.loginBlockedUntil).toISOString()}`);
     this.loginFlight = (async () => {
       this.cookies.clear();
       try {
@@ -118,7 +175,8 @@ export class MinusPodClient {
         if (data.authenticated !== true || !this.cookies.has("session") || !this.cookies.has("minuspod_csrf"))
           throw new Error("MinusPod did not establish an authenticated CSRF session");
       } catch {
-        this.cookies.clear(); this.loginBlockedUntil = Date.now()+60000;
+        this.cookies.clear(); this.loginBlockedUntil = Math.max(this.now()+60000,
+          Date.parse(this.observations.authentication.retryAfterAt??"")||0);
         throw new Error("MinusPod server-side login failed; verify the private app password locally");
       }
     })();
@@ -151,7 +209,8 @@ export class MinusPodClient {
     } catch (error) {
       if (signal.aborted) throw new PodcastSearchError("Podcast Index search timed out; check the app locally before retrying.");
       if (error instanceof ApiError) {
-        if (error.status===429) throw new PodcastSearchError("Podcast Index search rate limited by MinusPod (HTTP 429); wait before retrying. No automatic retry.");
+        if (error.status===429) throw new PodcastSearchError("Podcast Index search rate limited by MinusPod (HTTP 429); wait before retrying. No automatic retry. "+
+          (error.retryAfterAt?`Retry-After/cooldown until ${error.retryAfterAt}.`:"Retry-After/reset unknown."));
         if ([401,403].includes(error.status)) throw new PodcastSearchError("Podcast Index search authentication/permission failed; check the app locally.");
         if (error.status===503) throw new PodcastSearchError("Podcast Index search unavailable (HTTP 503); verify provider selection and configured credentials in MinusPod locally.");
         // The pinned proxy collapses provider errors (including 429/timeouts)
