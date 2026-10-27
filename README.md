@@ -217,3 +217,7 @@ Fresh contract review: MinusPod [v2.100.10 API docs](https://github.com/ttlequal
 [PodcastIndex current API specification](https://podcastindex-org.github.io/docs-api/pi_api.json),
 and SDK [Hono](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/serving/hono.md).
 Revalidate the contract on future MinusPod upgrades.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
